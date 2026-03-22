@@ -1,6 +1,6 @@
 # Traffic Plugin
 
-![Traffic Display](./docs/traffic-display.png)
+![Traffic Display](./docs/board-display.png)
 
 Display commute times and traffic conditions using Google Routes API.
 
