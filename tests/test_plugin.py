@@ -1,6 +1,8 @@
 """Tests for traffic data source."""
 
+import json
 import pytest
+from pathlib import Path
 from unittest.mock import Mock, patch
 from src.utils.traffic import TrafficSource, get_traffic_source
 
@@ -686,3 +688,66 @@ class TestTrafficPluginClass:
         plugin._config = {"api_key": "test_key", "routes": []}
         result = plugin.get_formatted_display()
         assert result is None
+
+
+MANIFEST_PATH = Path(__file__).resolve().parent.parent / "manifest.json"
+
+
+class TestManifestMetadata:
+    """Tests for rich variable metadata in manifest.json."""
+
+    @pytest.fixture(autouse=True)
+    def load_manifest(self):
+        with open(MANIFEST_PATH) as f:
+            self.manifest = json.load(f)
+        self.variables = self.manifest["variables"]
+
+    def test_required_top_level_fields(self):
+        for field in ("id", "name", "version", "variables"):
+            assert field in self.manifest, f"Missing required field: {field}"
+
+    def test_simple_variables_are_dicts(self):
+        simple = self.variables["simple"]
+        assert isinstance(simple, dict), "variables.simple must be a dict, not a list"
+
+    def test_simple_variable_required_keys(self):
+        required = {"description", "type", "max_length", "group", "example"}
+        for var_name, meta in self.variables["simple"].items():
+            missing = required - set(meta.keys())
+            assert not missing, f"{var_name} missing keys: {missing}"
+
+    def test_groups_defined(self):
+        assert "groups" in self.variables
+        assert len(self.variables["groups"]) > 0
+
+    def test_simple_variables_reference_valid_groups(self):
+        groups = set(self.variables["groups"].keys())
+        for var_name, meta in self.variables["simple"].items():
+            assert meta["group"] in groups, (
+                f"{var_name} references unknown group '{meta['group']}'"
+            )
+
+    def test_array_item_fields_reference_simple_vars(self):
+        simple_keys = set(self.variables["simple"].keys())
+        for arr_name, arr_meta in self.variables.get("arrays", {}).items():
+            for field in arr_meta.get("item_fields", []):
+                assert field in simple_keys, (
+                    f"arrays.{arr_name} references unknown field '{field}'"
+                )
+
+    def test_variable_types_valid(self):
+        valid_types = {"string", "number", "boolean"}
+        for var_name, meta in self.variables["simple"].items():
+            assert meta["type"] in valid_types, (
+                f"{var_name} has invalid type '{meta['type']}'"
+            )
+
+    def test_max_length_positive(self):
+        for var_name, meta in self.variables["simple"].items():
+            assert meta["max_length"] > 0, (
+                f"{var_name} max_length must be positive"
+            )
+
+    def test_example_values_present(self):
+        for var_name, meta in self.variables["simple"].items():
+            assert meta["example"], f"{var_name} must have a non-empty example"
