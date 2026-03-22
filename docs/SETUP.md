@@ -163,7 +163,7 @@ Each mode returns different routes optimized for that transportation type.
 
 ## Example Configuration
 
-![Traffic Display](./traffic-display.png)
+![Traffic Display](./board-display.png)
 
 Here's a complete example for a morning commute:
 
