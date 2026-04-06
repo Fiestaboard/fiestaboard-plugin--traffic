@@ -1,7 +1,7 @@
 {
   "id": "traffic",
   "name": "Traffic",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Display commute times and traffic conditions using Google Routes API",
   "author": "FiestaBoard Team",
   "repository": "https://github.com/Fiestaboard/fiestaboard-plugin--traffic",
@@ -209,5 +209,43 @@
       "caption": "Display commute times and traffic conditions using Google Routes API",
       "primary": true
     }
-  ]
+  ],
+  "demo": {
+    "name": "Traffic Demo",
+    "device_type": "flagship",
+    "template": [
+      "Commute Times",
+      "{{traffic.destination_name}}",
+      "{{traffic.duration_minutes}} min",
+      "+{{traffic.delay_minutes}} delay",
+      "{{traffic.traffic_status}} {{traffic.traffic_color}}",
+      "{{traffic.formatted}}"
+    ],
+    "line_metadata": [
+      {
+        "alignment": "center",
+        "wrap": false
+      },
+      {
+        "alignment": "center",
+        "wrap": false
+      },
+      {
+        "alignment": "center",
+        "wrap": false
+      },
+      {
+        "alignment": "center",
+        "wrap": false
+      },
+      {
+        "alignment": "center",
+        "wrap": false
+      },
+      {
+        "alignment": "center",
+        "wrap": false
+      }
+    ]
+  }
 }
