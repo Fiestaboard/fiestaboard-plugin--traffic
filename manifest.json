@@ -1,7 +1,7 @@
 {
   "id": "traffic",
   "name": "Traffic",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Display commute times and traffic conditions using Google Routes API",
   "author": "FiestaBoard Team",
   "repository": "https://github.com/Fiestaboard/fiestaboard-plugin--traffic",
@@ -211,41 +211,64 @@
     }
   ],
   "demo": {
-    "name": "Traffic Demo",
-    "device_type": "flagship",
-    "template": [
-      "Commute Times",
-      "{{traffic.destination_name}}",
-      "{{traffic.duration_minutes}} min",
-      "+{{traffic.delay_minutes}} delay",
-      "{{traffic.traffic_status}} {{traffic.traffic_color}}",
-      "{{traffic.formatted}}"
-    ],
-    "line_metadata": [
-      {
-        "alignment": "center",
-        "wrap": false
-      },
-      {
-        "alignment": "center",
-        "wrap": false
-      },
-      {
-        "alignment": "center",
-        "wrap": false
-      },
-      {
-        "alignment": "center",
-        "wrap": false
-      },
-      {
-        "alignment": "center",
-        "wrap": false
-      },
-      {
-        "alignment": "center",
-        "wrap": false
-      }
-    ]
+    "flagship": {
+      "name": "Traffic Demo",
+      "template": [
+        "Commute Times",
+        "{{traffic.destination_name}}",
+        "{{traffic.duration_minutes}} min",
+        "+{{traffic.delay_minutes}} delay",
+        "{{traffic.traffic_status}} {{traffic.traffic_color}}",
+        "{{traffic.formatted}}"
+      ],
+      "line_metadata": [
+        {
+          "alignment": "center",
+          "wrap": false
+        },
+        {
+          "alignment": "center",
+          "wrap": false
+        },
+        {
+          "alignment": "center",
+          "wrap": false
+        },
+        {
+          "alignment": "center",
+          "wrap": false
+        },
+        {
+          "alignment": "center",
+          "wrap": false
+        },
+        {
+          "alignment": "center",
+          "wrap": false
+        }
+      ]
+    },
+    "note": {
+      "name": "Traffic (Note)",
+      "template": [
+        "{{traffic.destination_name}}",
+        "{{traffic.duration_minutes}} MIN",
+        "+{{traffic.delay_minutes}} DELAY"
+      ],
+      "line_metadata": [
+        {
+          "alignment": "left",
+          "wrap": true
+        },
+        {
+          "alignment": "left",
+          "wrap": false
+        },
+        {
+          "alignment": "left",
+          "wrap": false
+        }
+      ]
+    }
   }
 }
