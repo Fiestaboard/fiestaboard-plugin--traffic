@@ -1,7 +1,7 @@
 {
   "id": "traffic",
   "name": "Traffic",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Display commute times and traffic conditions using Google Routes API",
   "author": "FiestaBoard Team",
   "repository": "https://github.com/Fiestaboard/fiestaboard-plugin--traffic",
