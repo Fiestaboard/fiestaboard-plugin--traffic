@@ -210,6 +210,28 @@
       "primary": true
     }
   ],
+  "teaser": "WORK 25 MIN +8",
+  "previews": [
+    {
+      "device_type": "flagship",
+      "rows": [
+        "{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}",
+        "    SF TO OAKLAND",
+        "",
+        " BAY BRIDGE    25 MIN",
+        " VIA I-880     32 MIN",
+        "{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}{65}"
+      ]
+    },
+    {
+      "device_type": "note",
+      "rows": [
+        "WORK",
+        "25 MIN",
+        "+8 DELAY"
+      ]
+    }
+  ],
   "demo": {
     "flagship": {
       "name": "Traffic Demo",
