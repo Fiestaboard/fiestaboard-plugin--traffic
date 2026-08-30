@@ -127,6 +127,22 @@ class TestPartialFailure:
         names = [r["destination_name"] for r in result.data["routes"]]
         assert "WORK" in names and "SCHOOL" in names
 
+    def test_a_failing_route_does_not_renumber_the_others(self, plugin):
+        """`{{traffic.routes.2.x}}` must keep meaning SCHOOL.
+
+        The array is positional, so compacting out a failed route silently
+        shows the user a different commute. See tests/test_travel_mode.py for
+        the transit case that makes this a routine occurrence rather than an
+        error path.
+        """
+        plugin.config = _config("WORK", "GYM", "SCHOOL")
+        with patch("plugins.traffic.requests.post", side_effect=[_ok(600), _fail(), _ok(1800)]):
+            routes = plugin.fetch_data().data["routes"]
+
+        assert [r["destination_name"] for r in routes] == ["WORK", "GYM", "SCHOOL"]
+        assert [r["available"] for r in routes] == [True, False, True]
+        assert routes[2]["duration_minutes"] == 30
+
     def test_every_route_failing_is_reported_as_unavailable(self, plugin):
         plugin.config = _config("WORK", "GYM")
         with patch("plugins.traffic.requests.post", side_effect=[_fail(403), _fail(403)]):

@@ -1,7 +1,7 @@
 {
   "id": "traffic",
   "name": "Traffic",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "Display commute times and traffic conditions using Google Routes API",
   "author": "FiestaBoard Team",
   "repository": "https://github.com/Fiestaboard/fiestaboard-plugin--traffic",
@@ -46,6 +46,26 @@
               "title": "Display Name",
               "description": "Short name (e.g., WORK, HOME)",
               "maxLength": 10
+            },
+            "travel_mode": {
+              "type": "string",
+              "title": "Travel Mode",
+              "description": "How you make this trip. Live traffic delays are only reported for Drive and Motorcycle; the other modes always show zero delay because Google has no traffic model for them.",
+              "default": "DRIVE",
+              "enum": [
+                "DRIVE",
+                "BICYCLE",
+                "TRANSIT",
+                "WALK",
+                "TWO_WHEELER"
+              ],
+              "enumNames": [
+                "Drive",
+                "Bicycle",
+                "Transit",
+                "Walk",
+                "Motorcycle / Scooter"
+              ]
             }
           },
           "required": [
@@ -155,6 +175,20 @@
         "max_length": 3,
         "group": "commute",
         "example": "12"
+      },
+      "travel_mode": {
+        "description": "Travel mode for the route (DRIVE, BICYCLE, TRANSIT, WALK, TWO_WHEELER)",
+        "type": "string",
+        "max_length": 11,
+        "group": "commute",
+        "example": "DRIVE"
+      },
+      "available": {
+        "description": "Whether the route returned data on the last refresh",
+        "type": "boolean",
+        "max_length": 3,
+        "group": "commute",
+        "example": "Yes"
       }
     },
     "arrays": {
@@ -166,7 +200,9 @@
           "traffic_status",
           "traffic_color",
           "destination_name",
-          "formatted"
+          "formatted",
+          "travel_mode",
+          "available"
         ]
       }
     }
@@ -176,7 +212,9 @@
     "routes.*.delay_minutes": 3,
     "routes.*.traffic_status": 8,
     "routes.*.destination_name": 10,
-    "routes.*.formatted": 22
+    "routes.*.formatted": 22,
+    "routes.*.travel_mode": 11,
+    "routes.*.available": 3
   },
   "color_rules_schema": {
     "traffic_status": {
