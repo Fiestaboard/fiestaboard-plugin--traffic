@@ -1,714 +1,379 @@
-"""Tests for traffic data source."""
+"""Tests for TrafficPlugin — this repository's plugin class.
+
+These tests exercise ``__init__.py`` in this repo (imported as
+``plugins.traffic`` via the symlink CI creates). They deliberately do *not*
+import ``src.utils.traffic.TrafficSource``: that class lives in
+Fiestaboard/FiestaBoard, is checked out only so this plugin can import
+``PluginBase``, and testing it here proves nothing about this repository.
+"""
 
 import json
-import pytest
 from pathlib import Path
 from unittest.mock import Mock, patch
-from src.utils.traffic import TrafficSource, get_traffic_source
+
+import pytest
+
+from plugins.traffic import Plugin, TrafficPlugin
+
+MANIFEST_PATH = Path(__file__).resolve().parent.parent / "manifest.json"
+
+ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes"
 
 
-class TestTrafficIndex:
-    """Tests for Traffic_Index calculation - the core logic."""
-    
-    def test_traffic_index_normal_conditions(self):
-        """Test traffic index when traffic time equals normal time."""
-        # No traffic: 30 minutes normal, 30 minutes with traffic
-        index = TrafficSource.calculate_traffic_index(
-            duration_in_traffic=1800,  # 30 min in seconds
-            duration_normal=1800
-        )
-        assert index == 1.0
-    
-    def test_traffic_index_light_traffic(self):
-        """Test traffic index with light traffic (under 20% increase)."""
-        # Light traffic: 30 minutes normal, 33 minutes with traffic (10% slower)
-        index = TrafficSource.calculate_traffic_index(
-            duration_in_traffic=1980,  # 33 min
-            duration_normal=1800       # 30 min
-        )
-        assert index == 1.1
-    
-    def test_traffic_index_yellow_threshold(self):
-        """Test traffic index at YELLOW threshold (> 1.2)."""
-        # Moderate traffic: 30 minutes normal, 36 minutes with traffic (20% slower)
-        index = TrafficSource.calculate_traffic_index(
-            duration_in_traffic=2160,  # 36 min
-            duration_normal=1800       # 30 min
-        )
-        assert index == 1.2
-        
-        # Just over threshold
-        index = TrafficSource.calculate_traffic_index(
-            duration_in_traffic=2170,
-            duration_normal=1800
-        )
-        assert index > 1.2
-    
-    def test_traffic_index_red_threshold(self):
-        """Test traffic index at RED threshold (> 1.5)."""
-        # Heavy traffic: 30 minutes normal, 45 minutes with traffic (50% slower)
-        index = TrafficSource.calculate_traffic_index(
-            duration_in_traffic=2700,  # 45 min
-            duration_normal=1800       # 30 min
-        )
-        assert index == 1.5
-        
-        # Just over threshold
-        index = TrafficSource.calculate_traffic_index(
-            duration_in_traffic=2710,
-            duration_normal=1800
-        )
-        assert index > 1.5
-    
-    def test_traffic_index_severe_traffic(self):
-        """Test traffic index with severe traffic (2x normal)."""
-        # Severe: 30 minutes normal, 60 minutes with traffic
-        index = TrafficSource.calculate_traffic_index(
-            duration_in_traffic=3600,
-            duration_normal=1800
-        )
-        assert index == 2.0
-    
-    def test_traffic_index_missing_traffic_duration(self):
-        """Test that missing traffic duration defaults to normal duration."""
-        # When durationInTraffic is None, should default to normal
-        index = TrafficSource.calculate_traffic_index(
-            duration_in_traffic=None,
-            duration_normal=1800
-        )
-        assert index == 1.0
-    
-    def test_traffic_index_zero_normal_duration(self):
-        """Test handling of zero normal duration (edge case)."""
-        # Should return 1.0 to avoid division by zero
-        index = TrafficSource.calculate_traffic_index(
-            duration_in_traffic=1800,
-            duration_normal=0
-        )
-        assert index == 1.0
-    
-    def test_traffic_index_negative_normal_duration(self):
-        """Test handling of negative normal duration (edge case)."""
-        index = TrafficSource.calculate_traffic_index(
-            duration_in_traffic=1800,
-            duration_normal=-100
-        )
-        assert index == 1.0
-    
-    def test_traffic_index_rounding(self):
-        """Test that traffic index is rounded to 2 decimal places."""
-        # 1800 / 1700 = 1.0588... should round to 1.06
-        index = TrafficSource.calculate_traffic_index(
-            duration_in_traffic=1800,
-            duration_normal=1700
-        )
-        assert index == 1.06
-    
-    def test_traffic_index_faster_than_normal(self):
-        """Test when traffic time is faster than normal (rare but possible)."""
-        # Sometimes traffic can be lighter than historical average
-        index = TrafficSource.calculate_traffic_index(
-            duration_in_traffic=1600,  # 26.7 min
-            duration_normal=1800       # 30 min
-        )
-        assert index < 1.0
-        assert index == 0.89
+def _manifest():
+    with open(MANIFEST_PATH) as f:
+        return json.load(f)
 
 
-class TestTrafficStatus:
-    """Tests for traffic status determination."""
-    
-    def test_light_traffic_green(self):
-        """Test LIGHT/GREEN status for index <= 1.2."""
-        status, color = TrafficSource.get_traffic_status(1.0)
-        assert status == "LIGHT"
-        assert color == "GREEN"
-        
-        status, color = TrafficSource.get_traffic_status(1.19)
-        assert status == "LIGHT"
-        assert color == "GREEN"
-        
-        # At exactly 1.2, still GREEN
-        status, color = TrafficSource.get_traffic_status(1.2)
-        assert status == "LIGHT"
-        assert color == "GREEN"
-    
-    def test_moderate_traffic_yellow(self):
-        """Test MODERATE/YELLOW status for 1.2 < index <= 1.5."""
-        status, color = TrafficSource.get_traffic_status(1.21)
-        assert status == "MODERATE"
-        assert color == "YELLOW"
-        
-        status, color = TrafficSource.get_traffic_status(1.35)
-        assert status == "MODERATE"
-        assert color == "YELLOW"
-        
-        # At exactly 1.5, still YELLOW
-        status, color = TrafficSource.get_traffic_status(1.5)
-        assert status == "MODERATE"
-        assert color == "YELLOW"
-    
-    def test_heavy_traffic_red(self):
-        """Test HEAVY/RED status for index > 1.5."""
-        status, color = TrafficSource.get_traffic_status(1.51)
-        assert status == "HEAVY"
-        assert color == "RED"
-        
-        status, color = TrafficSource.get_traffic_status(2.0)
-        assert status == "HEAVY"
-        assert color == "RED"
-        
-        status, color = TrafficSource.get_traffic_status(3.0)
-        assert status == "HEAVY"
-        assert color == "RED"
-    
-    def test_traffic_status_boundaries(self):
-        """Test exact boundary values."""
-        # 1.2 -> GREEN (not over)
-        _, color = TrafficSource.get_traffic_status(1.2)
-        assert color == "GREEN"
-        
-        # 1.200001 -> YELLOW (just over)
-        _, color = TrafficSource.get_traffic_status(1.200001)
-        assert color == "YELLOW"
-        
-        # 1.5 -> YELLOW (not over)
-        _, color = TrafficSource.get_traffic_status(1.5)
-        assert color == "YELLOW"
-        
-        # 1.500001 -> RED (just over)
-        _, color = TrafficSource.get_traffic_status(1.500001)
-        assert color == "RED"
+def _response(payload, status_code=200):
+    """A stand-in for a ``requests`` response carrying ``payload``."""
+    resp = Mock()
+    resp.status_code = status_code
+    resp.json.return_value = payload
+    return resp
 
 
-class TestMessageFormatting:
-    """Tests for message formatting."""
-    
-    def test_format_with_delay(self):
-        """Test format with traffic delay."""
-        msg = TrafficSource.format_message("DOWNTOWN", 45, 10)
-        assert msg == "DOWNTOWN: 45m (+10m delay)"
-    
-    def test_format_no_delay(self):
-        """Test format with no delay."""
-        msg = TrafficSource.format_message("DOWNTOWN", 30, 0)
-        assert msg == "DOWNTOWN: 30m"
-    
-    def test_format_custom_destination(self):
-        """Test format with custom destination name."""
-        msg = TrafficSource.format_message("WORK", 25, 5)
-        assert msg == "WORK: 25m (+5m delay)"
-    
-    def test_format_large_delay(self):
-        """Test format with large delay."""
-        msg = TrafficSource.format_message("AIRPORT", 90, 45)
-        assert msg == "AIRPORT: 90m (+45m delay)"
-    
-    def test_format_negative_delay_treated_as_zero(self):
-        """Test that negative delay shows no delay (edge case)."""
-        # The format_message itself doesn't handle this, but fetch does
-        msg = TrafficSource.format_message("DOWNTOWN", 30, -5)
-        # Currently will show negative, but in practice delay is max(0, ...)
-        assert "DOWNTOWN: 30m" in msg
+def _routes_payload(duration="1800s", static_duration="1800s"):
+    return {"routes": [{"duration": duration, "staticDuration": static_duration}]}
 
 
-class TestDurationParsing:
-    """Tests for duration string parsing."""
-    
-    def test_parse_duration_seconds(self):
-        """Test parsing duration string with 's' suffix."""
-        assert TrafficSource._parse_duration("1800s") == 1800
-        assert TrafficSource._parse_duration("3600s") == 3600
-        assert TrafficSource._parse_duration("0s") == 0
-    
-    def test_parse_duration_empty(self):
-        """Test parsing empty duration string."""
-        assert TrafficSource._parse_duration("") == 0
-        assert TrafficSource._parse_duration(None) == 0
-    
-    def test_parse_duration_no_suffix(self):
-        """Test parsing duration without 's' suffix."""
-        # rstrip('s') handles this
-        assert TrafficSource._parse_duration("1800") == 1800
+@pytest.fixture
+def plugin():
+    """A plugin instance built from the real manifest, with no config yet."""
+    return TrafficPlugin(_manifest())
 
 
-class TestTrafficSource:
-    """Tests for TrafficSource class."""
-    
-    def test_init_with_addresses(self):
-        """Test initialization with address strings."""
-        source = TrafficSource(
-            api_key="test_key",
-            routes=[{
-                "origin": "123 Main St, San Francisco, CA",
-                "destination": "456 Market St, San Francisco, CA",
-                "destination_name": "OFFICE"
-            }]
-        )
-        assert source.origin == "123 Main St, San Francisco, CA"
-        assert source.destination == "456 Market St, San Francisco, CA"
-        assert source.destination_name == "OFFICE"
-    
-    def test_init_default_destination_name(self):
-        """Test default destination name is DOWNTOWN."""
-        source = TrafficSource(
-            api_key="test_key",
-            routes=[{
-                "origin": "Origin",
-                "destination": "Dest"
-            }]
-        )
-        assert source.destination_name == "DOWNTOWN"
-    
-    def test_build_waypoint_address(self):
-        """Test building waypoint from address."""
-        source = TrafficSource("test_key", routes=[{"origin": "A", "destination": "B"}])
-        waypoint = source._build_waypoint("123 Main St, City, ST")
-        assert waypoint == {"address": "123 Main St, City, ST"}
-    
-    def test_build_waypoint_latlng(self):
-        """Test building waypoint from lat,lng."""
-        source = TrafficSource("test_key", routes=[{"origin": "A", "destination": "B"}])
-        waypoint = source._build_waypoint("37.7749, -122.4194")
-        assert "location" in waypoint
-        assert waypoint["location"]["latLng"]["latitude"] == 37.7749
-        assert waypoint["location"]["latLng"]["longitude"] == -122.4194
-    
-    def test_build_waypoint_latlng_no_space(self):
-        """Test building waypoint from lat,lng without spaces."""
-        source = TrafficSource("test_key", routes=[{"origin": "A", "destination": "B"}])
-        waypoint = source._build_waypoint("37.7749,-122.4194")
-        assert "location" in waypoint
-        assert waypoint["location"]["latLng"]["latitude"] == 37.7749
-    
-    @patch('src.utils.traffic.requests.post')
-    def test_fetch_traffic_data_success(self, mock_post):
-        """Test successful traffic data fetch."""
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "routes": [{
-                "duration": "2700s",      # 45 min with traffic
-                "staticDuration": "1800s", # 30 min normal
-                "routeToken": "test_token_123"
-            }]
-        }
-        mock_post.return_value = mock_response
-        
-        source = TrafficSource(
-            api_key="test_key",
-            routes=[{
-                "origin": "Home",
-                "destination": "Work",
-                "destination_name": "WORK"
-            }]
-        )
-        result = source.fetch_traffic_data()
-        
-        assert result is not None
-        assert result["duration"] == 2700
-        assert result["static_duration"] == 1800
-        assert result["route_token"] == "test_token_123"
-        assert result["traffic_index"] == 1.5
-        assert result["traffic_status"] == "MODERATE"  # At 1.5, still YELLOW
-        assert result["traffic_color"] == "YELLOW"
-        assert result["duration_minutes"] == 45
-        assert result["static_duration_minutes"] == 30
-        assert result["delay_minutes"] == 15
-        assert result["formatted_message"] == "WORK: 45m (+15m delay)"
-    
-    @patch('src.utils.traffic.requests.post')
-    def test_fetch_traffic_data_no_delay(self, mock_post):
-        """Test traffic data with no delay."""
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "routes": [{
-                "duration": "1800s",
-                "staticDuration": "1800s",
-                "routeToken": "token"
-            }]
-        }
-        mock_post.return_value = mock_response
-        
-        source = TrafficSource("test_key", routes=[{"origin": "A", "destination": "B", "destination_name": "DOWNTOWN"}])
-        result = source.fetch_traffic_data()
-        
-        assert result["traffic_index"] == 1.0
-        assert result["traffic_color"] == "GREEN"
-        assert result["delay_minutes"] == 0
-        assert result["formatted_message"] == "DOWNTOWN: 30m"
-    
-    @patch('src.utils.traffic.requests.post')
-    def test_fetch_traffic_data_heavy_traffic(self, mock_post):
-        """Test traffic data with heavy traffic."""
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "routes": [{
-                "duration": "3600s",       # 60 min with traffic
-                "staticDuration": "1800s", # 30 min normal
-                "routeToken": "token"
-            }]
-        }
-        mock_post.return_value = mock_response
-        
-        source = TrafficSource("test_key", routes=[{"origin": "A", "destination": "B", "destination_name": "AIRPORT"}])
-        result = source.fetch_traffic_data()
-        
-        assert result["traffic_index"] == 2.0
-        assert result["traffic_status"] == "HEAVY"
-        assert result["traffic_color"] == "RED"
-        assert result["delay_minutes"] == 30
-    
-    @patch('src.utils.traffic.requests.post')
-    def test_fetch_traffic_data_api_error(self, mock_post):
-        """Test handling of API errors."""
-        mock_post.side_effect = Exception("Network error")
-        
-        source = TrafficSource("test_key", routes=[{"origin": "A", "destination": "B"}])
-        result = source.fetch_traffic_data()
-        
-        assert result is None
-    
-    @patch('src.utils.traffic.requests.post')
-    def test_fetch_traffic_data_no_routes(self, mock_post):
-        """Test handling of empty routes response."""
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {"routes": []}
-        mock_post.return_value = mock_response
-        
-        source = TrafficSource("test_key", routes=[{"origin": "A", "destination": "B"}])
-        result = source.fetch_traffic_data()
-        
-        assert result is None
-    
-    @patch('src.utils.traffic.requests.post')
-    def test_fetch_traffic_data_missing_static_duration(self, mock_post):
-        """Test handling when staticDuration is missing (uses duration as fallback)."""
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "routes": [{
-                "duration": "1800s",
-                # No staticDuration
-                "routeToken": "token"
-            }]
-        }
-        mock_post.return_value = mock_response
-        
-        source = TrafficSource("test_key", routes=[{"origin": "A", "destination": "B"}])
-        result = source.fetch_traffic_data()
-        
-        assert result is not None
-        # When static_duration is 0, it falls back to duration
-        assert result["traffic_index"] == 1.0
+@pytest.fixture
+def configured(plugin):
+    """A plugin with an API key and one route configured."""
+    plugin.config = {
+        "api_key": "test_key",
+        "routes": [{"origin": "Home", "destination": "Work", "destination_name": "WORK"}],
+    }
+    return plugin
 
 
-class TestGetTrafficSource:
-    """Tests for get_traffic_source factory function."""
-    
-    @patch('src.utils.traffic.Config')
-    def test_get_traffic_source_with_config(self, mock_config):
-        """Test factory returns source when properly configured."""
-        mock_config.GOOGLE_ROUTES_API_KEY = "test_key"
-        mock_config.TRAFFIC_ORIGIN = "Home Address"
-        mock_config.TRAFFIC_DESTINATION = "Work Address"
-        mock_config.TRAFFIC_DESTINATION_NAME = "WORK"
-        
-        def mock_hasattr(obj, name):
-            return True
-        
-        with patch('builtins.hasattr', mock_hasattr):
-            source = get_traffic_source()
-        
-        assert source is not None
-        assert isinstance(source, TrafficSource)
-    
-    @patch('src.utils.traffic.Config')
-    def test_get_traffic_source_no_api_key(self, mock_config):
-        """Test factory returns None when API key missing."""
-        def mock_hasattr(obj, name):
-            return False
-        
-        with patch('builtins.hasattr', mock_hasattr):
-            source = get_traffic_source()
-        
-        assert source is None
-
-
-class TestTrafficIndexEdgeCases:
-    """Additional edge case tests for traffic index calculation."""
-    
-    def test_very_short_trip(self):
-        """Test traffic index for very short trip (5 minutes)."""
-        index = TrafficSource.calculate_traffic_index(
-            duration_in_traffic=360,  # 6 min
-            duration_normal=300       # 5 min
-        )
-        assert index == 1.2
-    
-    def test_very_long_trip(self):
-        """Test traffic index for very long trip (2 hours)."""
-        index = TrafficSource.calculate_traffic_index(
-            duration_in_traffic=9000,  # 2.5 hours with traffic
-            duration_normal=7200       # 2 hours normal
-        )
-        assert index == 1.25
-    
-    def test_extreme_traffic(self):
-        """Test traffic index with extreme traffic (3x normal)."""
-        index = TrafficSource.calculate_traffic_index(
-            duration_in_traffic=5400,  # 90 min
-            duration_normal=1800       # 30 min
-        )
-        assert index == 3.0
-        
-        status, color = TrafficSource.get_traffic_status(index)
-        assert status == "HEAVY"
-        assert color == "RED"
-    
-    def test_index_with_fractional_seconds(self):
-        """Test that calculation handles non-round numbers."""
-        # 1847 / 1800 = 1.0261...
-        index = TrafficSource.calculate_traffic_index(
-            duration_in_traffic=1847,
-            duration_normal=1800
-        )
-        assert index == 1.03  # Rounded to 2 decimals
-
-
-class TestTrafficPluginClass:
-    """Tests for TrafficPlugin class (plugins/traffic/__init__.py)."""
-
-    @pytest.fixture
-    def plugin(self):
-        from plugins.traffic import TrafficPlugin
-        manifest = {"id": "traffic", "name": "Traffic", "version": "1.0.0"}
-        return TrafficPlugin(manifest)
+class TestPluginIdentity:
+    """The plugin has to line up with its own manifest to load at all."""
 
     def test_plugin_id(self, plugin):
         assert plugin.plugin_id == "traffic"
 
-    def test_validate_config_valid(self, plugin):
+    def test_plugin_id_matches_manifest(self, plugin):
+        assert plugin.plugin_id == _manifest()["id"]
+
+    def test_module_exports_plugin_alias(self):
+        """The loader imports the module and looks for ``Plugin``."""
+        assert Plugin is TrafficPlugin
+
+    def test_info_comes_from_manifest(self, plugin):
+        manifest = _manifest()
+        assert plugin.info.id == manifest["id"]
+        assert plugin.info.version == manifest["version"]
+
+    def test_refresh_seconds_defaults_from_manifest(self, plugin):
+        assert plugin.refresh_seconds == 300
+
+    def test_refresh_seconds_clamped_to_manifest_floor(self, plugin):
+        """``min_refresh_seconds`` is a hard floor, not a suggestion."""
+        plugin.config = {"refresh_seconds": 5}
+        assert plugin.refresh_seconds == 60
+
+
+class TestValidateConfig:
+    def test_valid(self, plugin):
         config = {"api_key": "k", "routes": [{"origin": "A", "destination": "B"}]}
         assert plugin.validate_config(config) == []
 
-    def test_validate_config_missing_key(self, plugin):
+    def test_missing_api_key(self, plugin):
         errors = plugin.validate_config({"routes": [{}]})
         assert any("API key" in e for e in errors)
 
-    def test_validate_config_missing_routes(self, plugin):
+    def test_missing_routes(self, plugin):
         errors = plugin.validate_config({"api_key": "k"})
         assert any("route" in e for e in errors)
 
-    def test_validate_config_empty(self, plugin):
-        errors = plugin.validate_config({})
-        assert len(errors) == 2
+    def test_empty_routes_list_is_an_error(self, plugin):
+        errors = plugin.validate_config({"api_key": "k", "routes": []})
+        assert any("route" in e for e in errors)
 
-    def test_get_traffic_status_light(self, plugin):
-        status, color = plugin._get_traffic_status(1.0)
-        assert status == "LIGHT"
-        assert color == "{66}"
+    def test_empty_config_reports_both(self, plugin):
+        assert len(plugin.validate_config({})) == 2
 
-    def test_get_traffic_status_moderate(self, plugin):
-        status, color = plugin._get_traffic_status(1.3)
-        assert status == "MODERATE"
-        assert color == "{65}"
 
-    def test_get_traffic_status_heavy(self, plugin):
-        status, color = plugin._get_traffic_status(1.6)
-        assert status == "HEAVY"
-        assert color == "{63}"
+class TestTrafficStatus:
+    """Thresholds are ``>``, so the boundary values themselves stay green/yellow."""
 
-    def test_parse_duration(self, plugin):
-        assert plugin._parse_duration("1800s") == 1800
-        assert plugin._parse_duration("") == 0
-        assert plugin._parse_duration("3600") == 3600
+    @pytest.mark.parametrize(
+        "index,status,color",
+        [
+            (0.5, "LIGHT", "{66}"),
+            (1.0, "LIGHT", "{66}"),
+            (1.2, "LIGHT", "{66}"),
+            (1.21, "MODERATE", "{65}"),
+            (1.5, "MODERATE", "{65}"),
+            (1.51, "HEAVY", "{63}"),
+            (3.0, "HEAVY", "{63}"),
+        ],
+    )
+    def test_status_and_color(self, plugin, index, status, color):
+        assert plugin._get_traffic_status(index) == (status, color)
 
-    def test_build_waypoint_address(self, plugin):
-        wp = plugin._build_waypoint("123 Main St, City, ST")
-        assert wp == {"address": "123 Main St, City, ST"}
 
-    def test_build_waypoint_latlng(self, plugin):
+class TestParseDuration:
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [("1800s", 1800), ("0s", 0), ("3600", 3600), ("", 0), (None, 0)],
+    )
+    def test_parses(self, plugin, raw, expected):
+        assert plugin._parse_duration(raw) == expected
+
+    def test_non_numeric_raises(self, plugin):
+        """Callers must handle this; ``_fetch_single_route`` catches it."""
+        with pytest.raises(ValueError):
+            plugin._parse_duration("abcs")
+
+
+class TestBuildWaypoint:
+    def test_address(self, plugin):
+        assert plugin._build_waypoint("123 Main St, City, ST") == {"address": "123 Main St, City, ST"}
+
+    def test_lat_lng(self, plugin):
+        wp = plugin._build_waypoint("37.7749,-122.4194")
+        assert wp == {"location": {"latLng": {"latitude": 37.7749, "longitude": -122.4194}}}
+
+    def test_lat_lng_tolerates_spaces(self, plugin):
         wp = plugin._build_waypoint("37.7749, -122.4194")
-        assert "location" in wp
         assert wp["location"]["latLng"]["latitude"] == 37.7749
-        assert wp["location"]["latLng"]["longitude"] == -122.4194
 
-    def test_build_waypoint_invalid_latlng(self, plugin):
-        wp = plugin._build_waypoint("abc, def")
-        assert wp == {"address": "abc, def"}
+    def test_unparseable_pair_falls_back_to_address(self, plugin):
+        assert plugin._build_waypoint("abc, def") == {"address": "abc, def"}
 
-    def test_fetch_data_no_routes(self, plugin):
-        plugin._config = {}
+    def test_address_with_extra_commas_is_an_address(self, plugin):
+        """Three comma-separated parts is an address, not a coordinate pair."""
+        assert plugin._build_waypoint("1 Main St, Springfield, IL") == {
+            "address": "1 Main St, Springfield, IL"
+        }
+
+
+class TestFetchSingleRouteRequest:
+    """What we actually put on the wire."""
+
+    def test_request_shape(self, configured):
+        with patch("plugins.traffic.requests.post", return_value=_response(_routes_payload())) as post:
+            configured._fetch_single_route("Home", "Work", "WORK")
+
+        url = post.call_args.args[0]
+        body = post.call_args.kwargs["json"]
+        headers = post.call_args.kwargs["headers"]
+
+        assert url == ROUTES_URL
+        assert headers["X-Goog-Api-Key"] == "test_key"
+        assert headers["X-Goog-FieldMask"] == "routes.duration,routes.staticDuration"
+        assert body["origin"] == {"address": "Home"}
+        assert body["destination"] == {"address": "Work"}
+        assert body["travelMode"] == "DRIVE"
+        assert body["routingPreference"] == "TRAFFIC_AWARE_OPTIMAL"
+
+    def test_request_has_a_timeout(self, configured):
+        """A hung Google request must not stall the render loop."""
+        with patch("plugins.traffic.requests.post", return_value=_response(_routes_payload())) as post:
+            configured._fetch_single_route("Home", "Work", "WORK")
+        assert post.call_args.kwargs["timeout"] == 10
+
+
+class TestFetchSingleRouteResponse:
+    def test_delay_and_status(self, configured):
+        payload = _routes_payload(duration="2700s", static_duration="1800s")
+        with patch("plugins.traffic.requests.post", return_value=_response(payload)):
+            result = configured._fetch_single_route("Home", "Work", "WORK")
+
+        assert result["duration_minutes"] == 45
+        assert result["delay_minutes"] == 15
+        assert result["traffic_status"] == "MODERATE"
+        assert result["traffic_color"] == "{65}"
+        assert result["destination_name"] == "WORK"
+        assert result["formatted"] == "WORK: 45m (+15m)"
+
+    def test_no_delay_omits_the_delay_suffix(self, configured):
+        with patch("plugins.traffic.requests.post", return_value=_response(_routes_payload())):
+            result = configured._fetch_single_route("A", "B", "DEST")
+        assert result["delay_minutes"] == 0
+        assert result["formatted"] == "DEST: 30m"
+
+    def test_faster_than_static_never_reports_negative_delay(self, configured):
+        """Google can return a live duration below the static one."""
+        payload = _routes_payload(duration="1500s", static_duration="1800s")
+        with patch("plugins.traffic.requests.post", return_value=_response(payload)):
+            result = configured._fetch_single_route("A", "B", "DEST")
+        assert result["delay_minutes"] == 0
+        assert result["traffic_status"] == "LIGHT"
+
+    def test_missing_static_duration_falls_back_to_duration(self, configured):
+        payload = _routes_payload(duration="1800s", static_duration="0s")
+        with patch("plugins.traffic.requests.post", return_value=_response(payload)):
+            result = configured._fetch_single_route("A", "B", "DEST")
+        assert result["duration_minutes"] == 30
+        assert result["delay_minutes"] == 0
+
+    def test_only_the_first_route_alternative_is_used(self, configured):
+        payload = {
+            "routes": [
+                {"duration": "600s", "staticDuration": "600s"},
+                {"duration": "9999s", "staticDuration": "9999s"},
+            ]
+        }
+        with patch("plugins.traffic.requests.post", return_value=_response(payload)):
+            result = configured._fetch_single_route("A", "B", "DEST")
+        assert result["duration_minutes"] == 10
+
+    @pytest.mark.parametrize("status_code", [400, 403, 429, 500])
+    def test_non_200_returns_none(self, configured, status_code):
+        resp = _response(None, status_code=status_code)
+        with patch("plugins.traffic.requests.post", return_value=resp):
+            assert configured._fetch_single_route("A", "B", "DEST") is None
+
+    def test_empty_routes_array_returns_none(self, configured):
+        with patch("plugins.traffic.requests.post", return_value=_response({"routes": []})):
+            assert configured._fetch_single_route("A", "B", "DEST") is None
+
+    def test_missing_routes_key_returns_none(self, configured):
+        with patch("plugins.traffic.requests.post", return_value=_response({})):
+            assert configured._fetch_single_route("A", "B", "DEST") is None
+
+    def test_network_error_returns_none(self, configured):
+        with patch("plugins.traffic.requests.post", side_effect=OSError("boom")):
+            assert configured._fetch_single_route("A", "B", "DEST") is None
+
+    def test_unparseable_duration_returns_none(self, configured):
+        payload = _routes_payload(duration="not-a-duration", static_duration="1800s")
+        with patch("plugins.traffic.requests.post", return_value=_response(payload)):
+            assert configured._fetch_single_route("A", "B", "DEST") is None
+
+
+class TestFetchData:
+    def test_no_routes_configured(self, plugin):
+        plugin.config = {"api_key": "k"}
         result = plugin.fetch_data()
         assert not result.available
+        assert result.error == "No routes configured"
 
-    def test_fetch_single_route_success(self, plugin):
-        plugin._config = {"api_key": "test_key"}
-        mock_resp = Mock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "routes": [{
-                "duration": "2700s",
-                "staticDuration": "1800s",
-            }]
-        }
-        with patch('plugins.traffic.requests.post', return_value=mock_resp):
-            result = plugin._fetch_single_route("Home", "Work", "WORK")
-            assert result is not None
-            assert result["duration_minutes"] == 45
-            assert result["delay_minutes"] == 15
-            assert result["traffic_status"] == "MODERATE"
-
-    def test_fetch_single_route_no_delay(self, plugin):
-        plugin._config = {"api_key": "test_key"}
-        mock_resp = Mock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "routes": [{"duration": "1800s", "staticDuration": "1800s"}]
-        }
-        with patch('plugins.traffic.requests.post', return_value=mock_resp):
-            result = plugin._fetch_single_route("A", "B", "DEST")
-            assert result is not None
-            assert result["delay_minutes"] == 0
-            assert "DEST: 30m" == result["formatted"]
-
-    def test_fetch_single_route_api_error(self, plugin):
-        plugin._config = {"api_key": "test_key"}
-        with patch('plugins.traffic.requests.post', side_effect=Exception("fail")):
-            result = plugin._fetch_single_route("A", "B", "DEST")
-            assert result is None
-
-    def test_fetch_single_route_bad_status(self, plugin):
-        plugin._config = {"api_key": "test_key"}
-        mock_resp = Mock()
-        mock_resp.status_code = 403
-        with patch('plugins.traffic.requests.post', return_value=mock_resp):
-            result = plugin._fetch_single_route("A", "B", "DEST")
-            assert result is None
-
-    def test_fetch_single_route_empty_routes(self, plugin):
-        """Test when API returns no routes in response."""
-        plugin._config = {"api_key": "test_key"}
-        mock_resp = Mock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"routes": []}
-        with patch('plugins.traffic.requests.post', return_value=mock_resp):
-            result = plugin._fetch_single_route("A", "B", "DEST")
-            assert result is None
-
-    def test_fetch_single_route_missing_static_duration(self, plugin):
-        """Test when staticDuration is 0 or missing."""
-        plugin._config = {"api_key": "test_key"}
-        mock_resp = Mock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "routes": [{"duration": "1800s", "staticDuration": "0s"}]
-        }
-        with patch('plugins.traffic.requests.post', return_value=mock_resp):
-            result = plugin._fetch_single_route("A", "B", "DEST")
-            assert result is not None
-            assert result["duration_minutes"] == 30
-
-    def test_fetch_data_all_routes_fail(self, plugin):
-        """Test when all routes fail to fetch."""
-        plugin._config = {
-            "api_key": "test_key",
+    def test_success_populates_primary_and_aggregates(self, plugin):
+        plugin.config = {
+            "api_key": "k",
             "routes": [
-                {"origin": "A", "destination": "B", "destination_name": "DEST1"},
-                {"origin": "C", "destination": "D", "destination_name": "DEST2"}
-            ]
+                {"origin": "H", "destination": "W", "destination_name": "WORK"},
+                {"origin": "H", "destination": "G", "destination_name": "GYM"},
+            ],
         }
-        with patch.object(plugin, '_fetch_single_route', return_value=None):
+        payloads = [
+            _response(_routes_payload(duration="1800s", static_duration="1800s")),
+            _response(_routes_payload(duration="2700s", static_duration="1800s")),
+        ]
+        with patch("plugins.traffic.requests.post", side_effect=payloads):
             result = plugin.fetch_data()
-            assert not result.available
-            assert "Failed to fetch any route data" in result.error
 
-    def test_fetch_data_success(self, plugin):
-        plugin._config = {
-            "api_key": "test_key",
-            "routes": [
-                {"origin": "Home", "destination": "Work", "destination_name": "WORK"}
-            ]
-        }
-        mock_route = {
-            "duration_minutes": 30,
-            "delay_minutes": 5,
-            "traffic_status": "MODERATE",
-            "traffic_color": "{65}",
-            "destination_name": "WORK",
-            "formatted": "WORK: 30m (+5m)",
-        }
-        with patch.object(plugin, '_fetch_single_route', return_value=mock_route):
+        assert result.available
+        data = result.data
+        # Primary is the first configured route, not the worst one.
+        assert data["destination_name"] == "WORK"
+        assert data["duration_minutes"] == 30
+        assert data["delay_minutes"] == 0
+        assert data["route_count"] == 2
+        # ...but worst_delay looks across every route.
+        assert data["worst_delay"] == 15
+        assert [r["destination_name"] for r in data["routes"]] == ["WORK", "GYM"]
+
+    def test_default_destination_name(self, plugin):
+        plugin.config = {"api_key": "k", "routes": [{"origin": "H", "destination": "W"}]}
+        with patch("plugins.traffic.requests.post", return_value=_response(_routes_payload())):
             result = plugin.fetch_data()
-            assert result.available
-            assert result.data["route_count"] == 1
+        assert result.data["destination_name"] == "DEST"
 
-    def test_get_formatted_display_with_cache(self, plugin):
-        """Test get_formatted_display with cached data."""
-        plugin._cache = {
+    def test_caps_at_four_routes(self, plugin):
+        """``maxItems`` is 4 in the manifest and the code slices ``[:4]``."""
+        plugin.config = {
+            "api_key": "k",
             "routes": [
-                {"formatted": "HOME: 30m (+5m)"},
-                {"formatted": "WORK: 25m"}
-            ]
+                {"origin": "H", "destination": f"D{i}", "destination_name": f"D{i}"} for i in range(6)
+            ],
         }
+        with patch("plugins.traffic.requests.post", return_value=_response(_routes_payload())) as post:
+            result = plugin.fetch_data()
+        assert post.call_count == 4
+        assert result.data["route_count"] == 4
+
+    def test_all_routes_failing_is_unavailable(self, plugin):
+        plugin.config = {
+            "api_key": "k",
+            "routes": [
+                {"origin": "A", "destination": "B", "destination_name": "ONE"},
+                {"origin": "C", "destination": "D", "destination_name": "TWO"},
+            ],
+        }
+        with patch("plugins.traffic.requests.post", return_value=_response(None, status_code=403)):
+            result = plugin.fetch_data()
+        assert not result.available
+        assert "Failed to fetch any route data" in result.error
+
+    def test_caches_the_last_successful_payload(self, configured):
+        with patch("plugins.traffic.requests.post", return_value=_response(_routes_payload())):
+            result = configured.fetch_data()
+        assert configured._cache == result.data
+
+
+class TestGetFormattedDisplay:
+    def test_uses_cache_when_present(self, plugin):
+        plugin._cache = {"routes": [{"formatted": "HOME: 30m (+5m)"}, {"formatted": "WORK: 25m"}]}
         lines = plugin.get_formatted_display()
-        assert lines is not None
         assert len(lines) == 6
         assert lines[0] == "TRAFFIC".center(22)
+        assert lines[1] == ""
         assert lines[2] == "HOME: 30m (+5m)"
         assert lines[3] == "WORK: 25m"
+        assert lines[4:] == ["", ""]
 
-    def test_get_formatted_display_no_cache(self, plugin):
-        """Test get_formatted_display without cache."""
-        plugin._cache = None
-        plugin._config = {
-            "api_key": "test_key",
-            "routes": [{"origin": "A", "destination": "B", "destination_name": "DEST"}]
-        }
-        mock_route = {
-            "duration_minutes": 20,
-            "delay_minutes": 0,
-            "traffic_status": "LIGHT",
-            "traffic_color": "{62}",
-            "destination_name": "DEST",
-            "formatted": "DEST: 20m"
-        }
-        with patch.object(plugin, '_fetch_single_route', return_value=mock_route):
-            lines = plugin.get_formatted_display()
-            assert lines is not None
-            assert len(lines) == 6
+    def test_fetches_when_cache_is_empty(self, configured):
+        configured._cache = None
+        with patch("plugins.traffic.requests.post", return_value=_response(_routes_payload())):
+            lines = configured.get_formatted_display()
+        assert len(lines) == 6
+        assert lines[2] == "WORK: 30m"
 
-    def test_get_formatted_display_fetch_fails(self, plugin):
-        """Test get_formatted_display when fetch fails."""
-        plugin._cache = None
-        plugin._config = {"api_key": "test_key", "routes": []}
-        result = plugin.get_formatted_display()
-        assert result is None
+    def test_returns_none_when_fetch_fails(self, plugin):
+        plugin.config = {"api_key": "k", "routes": []}
+        assert plugin.get_formatted_display() is None
 
+    def test_truncates_to_board_width(self, plugin):
+        plugin._cache = {"routes": [{"formatted": "X" * 40}]}
+        lines = plugin.get_formatted_display()
+        assert all(len(line) <= 22 for line in lines)
 
-MANIFEST_PATH = Path(__file__).resolve().parent.parent / "manifest.json"
+    def test_never_shows_more_than_four_routes(self, plugin):
+        plugin._cache = {"routes": [{"formatted": f"R{i}"} for i in range(6)]}
+        lines = plugin.get_formatted_display()
+        assert len(lines) == 6
+        assert lines[-1] == "R3"
 
 
 class TestManifestMetadata:
-    """Tests for rich variable metadata in manifest.json."""
+    """The manifest is a contract with core's settings form and variable picker."""
 
     @pytest.fixture(autouse=True)
     def load_manifest(self):
-        with open(MANIFEST_PATH) as f:
-            self.manifest = json.load(f)
+        self.manifest = _manifest()
         self.variables = self.manifest["variables"]
 
     def test_required_top_level_fields(self):
         for field in ("id", "name", "version", "variables"):
             assert field in self.manifest, f"Missing required field: {field}"
 
+    def test_version_is_semver(self):
+        parts = self.manifest["version"].split(".")
+        assert len(parts) == 3 and all(p.isdigit() for p in parts)
+
     def test_simple_variables_are_dicts(self):
-        simple = self.variables["simple"]
-        assert isinstance(simple, dict), "variables.simple must be a dict, not a list"
+        assert isinstance(self.variables["simple"], dict), "variables.simple must be a dict, not a list"
 
     def test_simple_variable_required_keys(self):
         required = {"description", "type", "max_length", "group", "example"}
@@ -717,37 +382,70 @@ class TestManifestMetadata:
             assert not missing, f"{var_name} missing keys: {missing}"
 
     def test_groups_defined(self):
-        assert "groups" in self.variables
-        assert len(self.variables["groups"]) > 0
+        assert self.variables.get("groups")
 
     def test_simple_variables_reference_valid_groups(self):
-        groups = set(self.variables["groups"].keys())
+        groups = set(self.variables["groups"])
         for var_name, meta in self.variables["simple"].items():
-            assert meta["group"] in groups, (
-                f"{var_name} references unknown group '{meta['group']}'"
-            )
+            assert meta["group"] in groups, f"{var_name} references unknown group '{meta['group']}'"
 
     def test_array_item_fields_reference_simple_vars(self):
-        simple_keys = set(self.variables["simple"].keys())
+        simple_keys = set(self.variables["simple"])
         for arr_name, arr_meta in self.variables.get("arrays", {}).items():
             for field in arr_meta.get("item_fields", []):
-                assert field in simple_keys, (
-                    f"arrays.{arr_name} references unknown field '{field}'"
-                )
+                assert field in simple_keys, f"arrays.{arr_name} references unknown field '{field}'"
 
     def test_variable_types_valid(self):
         valid_types = {"string", "number", "boolean"}
         for var_name, meta in self.variables["simple"].items():
-            assert meta["type"] in valid_types, (
-                f"{var_name} has invalid type '{meta['type']}'"
-            )
+            assert meta["type"] in valid_types, f"{var_name} has invalid type '{meta['type']}'"
 
     def test_max_length_positive(self):
         for var_name, meta in self.variables["simple"].items():
-            assert meta["max_length"] > 0, (
-                f"{var_name} max_length must be positive"
-            )
+            assert meta["max_length"] > 0, f"{var_name} max_length must be positive"
 
     def test_example_values_present(self):
         for var_name, meta in self.variables["simple"].items():
             assert meta["example"], f"{var_name} must have a non-empty example"
+
+    def test_declared_simple_variables_are_actually_produced(self, plugin):
+        """Every ``variables.simple`` key must appear in ``fetch_data``'s payload.
+
+        A variable the picker offers but the plugin never emits renders as
+        ``???`` on the board.
+        """
+        plugin.config = {
+            "api_key": "k",
+            "routes": [{"origin": "H", "destination": "W", "destination_name": "WORK"}],
+        }
+        with patch("plugins.traffic.requests.post", return_value=_response(_routes_payload())):
+            result = plugin.fetch_data()
+
+        missing = set(self.variables["simple"]) - set(result.data)
+        assert not missing, f"manifest declares variables fetch_data never emits: {sorted(missing)}"
+
+    def test_declared_route_item_fields_are_actually_produced(self, plugin):
+        plugin.config = {
+            "api_key": "k",
+            "routes": [{"origin": "H", "destination": "W", "destination_name": "WORK"}],
+        }
+        with patch("plugins.traffic.requests.post", return_value=_response(_routes_payload())):
+            result = plugin.fetch_data()
+
+        declared = set(self.manifest["variables"]["arrays"]["routes"]["item_fields"])
+        produced = set(result.data["routes"][0])
+        assert not declared - produced, f"routes items missing: {sorted(declared - produced)}"
+
+    def test_color_rule_values_match_the_statuses_the_code_emits(self, plugin):
+        """``color_rules_schema`` matches on exact strings from ``_get_traffic_status``."""
+        rules = self.manifest["color_rules_schema"]["traffic_status"]["default_rules"]
+        rule_values = {r["value"] for r in rules}
+        emitted = {plugin._get_traffic_status(i)[0] for i in (1.0, 1.3, 2.0)}
+        assert emitted <= rule_values, f"statuses with no colour rule: {sorted(emitted - rule_values)}"
+
+    def test_max_lengths_keys_reference_real_route_fields(self):
+        item_fields = set(self.manifest["variables"]["arrays"]["routes"]["item_fields"])
+        for key in self.manifest["max_lengths"]:
+            prefix, _, field = key.partition(".*.")
+            assert prefix == "routes", f"max_lengths key '{key}' targets an unknown array"
+            assert field in item_fields, f"max_lengths key '{key}' targets an unknown field"

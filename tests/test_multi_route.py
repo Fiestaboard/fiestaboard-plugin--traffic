@@ -1,86 +1,137 @@
-"""Tests for Traffic multi-route support and backward compatibility."""
+"""Multi-route behaviour of TrafficPlugin.
+
+The ``routes`` array is addressed positionally in templates
+(``{{traffic.routes.1.duration_minutes}}``), so which route ends up at which
+index is part of the plugin's contract, not an implementation detail.
+"""
+
+import json
+from pathlib import Path
+from unittest.mock import Mock, patch
 
 import pytest
-from src.utils.traffic import TrafficSource
+
+from plugins.traffic import TrafficPlugin
+
+MANIFEST_PATH = Path(__file__).resolve().parent.parent / "manifest.json"
 
 
-class TestTrafficMultiRoute:
-    """Test Traffic multi-route functionality."""
-    
-    def test_single_route_backward_compatibility(self):
-        """Test that single route dict still works."""
-        source = TrafficSource(
-            api_key="test_key",
-            routes=[{
-                "origin": "123 Main St",
-                "destination": "456 Market St",
-                "destination_name": "WORK"
-            }]
-        )
-        
-        assert len(source.routes) == 1
-        assert source.origin == "123 Main St"
-        assert source.destination == "456 Market St"
-        assert source.destination_name == "WORK"
-    
-    def test_multiple_routes(self):
-        """Test that multiple routes work."""
-        source = TrafficSource(
-            api_key="test_key",
-            routes=[
-                {
-                    "origin": "Home",
-                    "destination": "Work",
-                    "destination_name": "WORK"
-                },
-                {
-                    "origin": "Home",
-                    "destination": "Airport",
-                    "destination_name": "AIRPORT"
-                }
-            ]
-        )
-        
-        assert len(source.routes) == 2
-        assert source.origin == "Home"  # First route for backward compat
-        assert source.routes[1]["destination_name"] == "AIRPORT"
-    
-    def test_empty_routes(self):
-        """Test handling of empty routes."""
-        source = TrafficSource(
-            api_key="test_key",
-            routes=[]
-        )
-        
-        assert source.routes == []
-    
-    def test_traffic_index_calculation(self):
-        """Test traffic index calculation."""
-        # Normal traffic (1.0)
-        assert TrafficSource.calculate_traffic_index(1000, 1000) == 1.0
-        
-        # 20% slower (1.2)
-        assert TrafficSource.calculate_traffic_index(1200, 1000) == 1.2
-        
-        # 50% slower (1.5)
-        assert TrafficSource.calculate_traffic_index(1500, 1000) == 1.5
-    
-    def test_traffic_status(self):
-        """Test traffic status determination."""
-        # Light traffic
-        status, color = TrafficSource.get_traffic_status(1.0)
-        assert status == "LIGHT"
-        assert color == "GREEN"
-        
-        # Moderate traffic
-        status, color = TrafficSource.get_traffic_status(1.3)
-        assert status == "MODERATE"
-        assert color == "YELLOW"
-        
-        # Heavy traffic
-        status, color = TrafficSource.get_traffic_status(1.6)
-        assert status == "HEAVY"
-        assert color == "RED"
+def _manifest():
+    with open(MANIFEST_PATH) as f:
+        return json.load(f)
 
 
+def _response(payload, status_code=200):
+    resp = Mock()
+    resp.status_code = status_code
+    resp.json.return_value = payload
+    return resp
 
+
+def _ok(duration_s, static_s=None):
+    static_s = duration_s if static_s is None else static_s
+    return _response({"routes": [{"duration": f"{duration_s}s", "staticDuration": f"{static_s}s"}]})
+
+
+def _fail(status_code=500):
+    return _response(None, status_code=status_code)
+
+
+def _config(*names):
+    return {
+        "api_key": "k",
+        "routes": [{"origin": "H", "destination": n, "destination_name": n} for n in names],
+    }
+
+
+@pytest.fixture
+def plugin():
+    return TrafficPlugin(_manifest())
+
+
+class TestRouteOrdering:
+    def test_routes_keep_configuration_order(self, plugin):
+        plugin.config = _config("WORK", "GYM", "SCHOOL")
+        with patch("plugins.traffic.requests.post", side_effect=[_ok(600), _ok(1200), _ok(1800)]):
+            data = plugin.fetch_data().data
+
+        assert [r["destination_name"] for r in data["routes"]] == ["WORK", "GYM", "SCHOOL"]
+        assert [r["duration_minutes"] for r in data["routes"]] == [10, 20, 30]
+
+    def test_each_route_gets_its_own_request(self, plugin):
+        plugin.config = _config("WORK", "GYM")
+        with patch("plugins.traffic.requests.post", side_effect=[_ok(600), _ok(1200)]) as post:
+            plugin.fetch_data()
+
+        destinations = [call.kwargs["json"]["destination"]["address"] for call in post.call_args_list]
+        assert destinations == ["WORK", "GYM"]
+
+    def test_primary_variables_mirror_route_zero(self, plugin):
+        plugin.config = _config("WORK", "GYM")
+        with patch("plugins.traffic.requests.post", side_effect=[_ok(600), _ok(1200)]):
+            data = plugin.fetch_data().data
+
+        first = data["routes"][0]
+        for key in ("duration_minutes", "delay_minutes", "traffic_status", "traffic_color", "formatted"):
+            assert data[key] == first[key]
+
+
+class TestAggregates:
+    def test_worst_delay_scans_every_route(self, plugin):
+        plugin.config = _config("WORK", "GYM", "SCHOOL")
+        responses = [_ok(600, 600), _ok(2400, 1800), _ok(1200, 1080)]
+        with patch("plugins.traffic.requests.post", side_effect=responses):
+            data = plugin.fetch_data().data
+
+        assert data["worst_delay"] == 10  # GYM: 2400s vs 1800s
+        assert data["delay_minutes"] == 0  # ...but the primary route is clear
+
+    def test_worst_delay_is_zero_when_nothing_is_delayed(self, plugin):
+        plugin.config = _config("WORK", "GYM")
+        with patch("plugins.traffic.requests.post", side_effect=[_ok(600), _ok(1200)]):
+            data = plugin.fetch_data().data
+        assert data["worst_delay"] == 0
+
+    def test_route_count_matches_the_routes_array(self, plugin):
+        plugin.config = _config("A", "B", "C")
+        with patch("plugins.traffic.requests.post", side_effect=[_ok(600), _ok(600), _ok(600)]):
+            data = plugin.fetch_data().data
+        assert data["route_count"] == len(data["routes"]) == 3
+
+
+class TestSingleRoute:
+    """The common case: one route configured, primary variables are all you need."""
+
+    def test_one_route(self, plugin):
+        plugin.config = _config("WORK")
+        with patch("plugins.traffic.requests.post", side_effect=[_ok(1500, 1200)]):
+            data = plugin.fetch_data().data
+
+        assert data["route_count"] == 1
+        assert data["destination_name"] == "WORK"
+        assert data["duration_minutes"] == 25
+        assert data["delay_minutes"] == 5
+        assert data["worst_delay"] == 5
+        assert data["formatted"] == "WORK: 25m (+5m)"
+
+
+class TestPartialFailure:
+    """One route failing must not corrupt the others."""
+
+    def test_a_failing_route_does_not_break_the_healthy_ones(self, plugin):
+        plugin.config = _config("WORK", "GYM", "SCHOOL")
+        with patch("plugins.traffic.requests.post", side_effect=[_ok(600), _fail(), _ok(1800)]):
+            result = plugin.fetch_data()
+
+        assert result.available
+        names = [r["destination_name"] for r in result.data["routes"]]
+        assert "WORK" in names and "SCHOOL" in names
+
+    def test_every_route_failing_is_reported_as_unavailable(self, plugin):
+        plugin.config = _config("WORK", "GYM")
+        with patch("plugins.traffic.requests.post", side_effect=[_fail(403), _fail(403)]):
+            result = plugin.fetch_data()
+
+        assert not result.available
+        assert result.data is None
+        assert "Failed to fetch any route data" in result.error
