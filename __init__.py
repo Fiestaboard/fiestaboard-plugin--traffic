@@ -20,7 +20,18 @@ class TrafficPlugin(PluginBase):
     
     TRAFFIC_INDEX_YELLOW = 1.2
     TRAFFIC_INDEX_RED = 1.5
-    
+
+    #: Travel modes the Routes API accepts on ``computeRoutes``.
+    VALID_TRAVEL_MODES = ("DRIVE", "BICYCLE", "TRANSIT", "WALK", "TWO_WHEELER")
+
+    DEFAULT_TRAVEL_MODE = "DRIVE"
+
+    #: Modes that accept ``routingPreference``.  Sending it with any other mode
+    #: is a 400 from Google, not a soft ignore -- so this is a hard gate, not an
+    #: optimisation.  Their upside is that they are also the only modes with a
+    #: live traffic model; see ``_fetch_single_route``.
+    TRAFFIC_AWARE_MODES = ("DRIVE", "TWO_WHEELER")
+
     def __init__(self, manifest: Dict[str, Any]):
         """Initialize the traffic plugin."""
         super().__init__(manifest)
@@ -33,16 +44,68 @@ class TrafficPlugin(PluginBase):
     def validate_config(self, config: Dict[str, Any]) -> List[str]:
         """Validate traffic configuration."""
         errors = []
-        
+
         if not config.get("api_key"):
             errors.append("Google Routes API key is required")
-        
+
         routes = config.get("routes", [])
         if not routes:
             errors.append("At least one route is required")
-        
+
+        for index, route in enumerate(routes):
+            if not isinstance(route, dict):
+                continue
+            mode = route.get("travel_mode")
+            # Absent is fine -- travel_mode is optional and defaults to DRIVE,
+            # so configs saved before this field existed stay valid.
+            if mode in (None, ""):
+                continue
+            if str(mode).strip().upper() not in self.VALID_TRAVEL_MODES:
+                errors.append(
+                    f"Route {index + 1}: invalid travel mode '{mode}' "
+                    f"(expected one of {', '.join(self.VALID_TRAVEL_MODES)})"
+                )
+
         return errors
-    
+
+    def _normalize_travel_mode(self, travel_mode: Optional[str]) -> str:
+        """Coerce a configured travel mode to one the Routes API accepts.
+
+        Anything unrecognised falls back to DRIVE with a warning rather than
+        failing the route: a bad value in a hand-edited config should degrade
+        the board, not blank it.  ``validate_config`` reports the same value as
+        an error so it is visible at save time.
+        """
+        mode = str(travel_mode or "").strip().upper()
+        if mode not in self.VALID_TRAVEL_MODES:
+            if mode:
+                logger.warning(
+                    f"Invalid travel mode '{travel_mode}', falling back to {self.DEFAULT_TRAVEL_MODE}"
+                )
+            return self.DEFAULT_TRAVEL_MODE
+        return mode
+
+    def _unavailable_route(self, destination_name: str, travel_mode: str) -> Dict[str, Any]:
+        """A placeholder that holds a route's slot in the ``routes`` array.
+
+        ``routes`` is addressed positionally in templates
+        (``{{traffic.routes.2.duration_minutes}}``), so dropping a route that
+        returned nothing would silently slide every later route up an index and
+        show the user the wrong commute.  A route that has no answer right now
+        keeps its position and reports no numbers: the template engine renders
+        ``None`` as ``???``, which is its established "no value" output.
+        """
+        return {
+            "duration_minutes": None,
+            "delay_minutes": None,
+            "traffic_status": "UNKNOWN",
+            "traffic_color": "",
+            "destination_name": destination_name,
+            "formatted": f"{destination_name}: NO DATA"[:22],
+            "travel_mode": travel_mode,
+            "available": False,
+        }
+
     def _get_traffic_status(self, traffic_index: float) -> Tuple[str, str]:
         """Get traffic status and color."""
         if traffic_index > self.TRAFFIC_INDEX_RED:
@@ -75,24 +138,40 @@ class TrafficPlugin(PluginBase):
                     pass
         return {"address": location}
     
-    def _fetch_single_route(self, origin: str, destination: str, destination_name: str) -> Optional[Dict]:
+    def _fetch_single_route(
+        self,
+        origin: str,
+        destination: str,
+        destination_name: str,
+        travel_mode: str = DEFAULT_TRAVEL_MODE,
+    ) -> Optional[Dict]:
         """Fetch traffic data for a single route."""
         api_key = self.config.get("api_key")
-        
+        mode = self._normalize_travel_mode(travel_mode)
+
         url = "https://routes.googleapis.com/directions/v2:computeRoutes"
         headers = {
             "Content-Type": "application/json",
             "X-Goog-Api-Key": api_key,
             "X-Goog-FieldMask": "routes.duration,routes.staticDuration"
         }
-        
+
         body = {
             "origin": self._build_waypoint(origin),
             "destination": self._build_waypoint(destination),
-            "travelMode": "DRIVE",
-            "routingPreference": "TRAFFIC_AWARE_OPTIMAL",
+            "travelMode": mode,
         }
-        
+
+        # routingPreference is only valid for DRIVE and TWO_WHEELER; Google
+        # rejects the whole request with a 400 for the other modes.  The cost of
+        # leaving it off is that `duration` comes back equal to
+        # `staticDuration`, so the traffic index is 1.0 and every walk/bike/
+        # transit route reads as LIGHT with zero delay.  That is honest -- those
+        # modes have no traffic model to report -- and is documented in
+        # docs/SETUP.md rather than papered over with invented numbers.
+        if mode in self.TRAFFIC_AWARE_MODES:
+            body["routingPreference"] = "TRAFFIC_AWARE_OPTIMAL"
+
         try:
             response = requests.post(url, json=body, headers=headers, timeout=10)
             
@@ -133,8 +212,10 @@ class TrafficPlugin(PluginBase):
                 "traffic_color": traffic_color,
                 "destination_name": destination_name,
                 "formatted": formatted,
+                "travel_mode": mode,
+                "available": True,
             }
-            
+
         except Exception as e:
             logger.error(f"Error fetching traffic for {destination_name}: {e}")
             return None
@@ -150,26 +231,33 @@ class TrafficPlugin(PluginBase):
         
         routes_data = []
         for route in routes_config[:4]:
+            destination_name = route.get("destination_name", "DEST")
+            travel_mode = self._normalize_travel_mode(route.get("travel_mode"))
             route_data = self._fetch_single_route(
                 origin=route.get("origin", ""),
                 destination=route.get("destination", ""),
-                destination_name=route.get("destination_name", "DEST")
+                destination_name=destination_name,
+                travel_mode=travel_mode,
             )
-            if route_data:
-                routes_data.append(route_data)
-        
-        if not routes_data:
+            # A route with no answer keeps its slot.  Transit in particular can
+            # legitimately return an empty ``routes`` array when there is no
+            # service at this hour, and dropping it would renumber every route
+            # after it.
+            routes_data.append(route_data or self._unavailable_route(destination_name, travel_mode))
+
+        available_routes = [route for route in routes_data if route["available"]]
+        if not available_routes:
             return PluginResult(
                 available=False,
                 error="Failed to fetch any route data"
             )
-        
-        # Find worst delay
-        worst = max(routes_data, key=lambda r: r["delay_minutes"])
-        
+
+        # Find worst delay (only routes that reported one can have a worst)
+        worst = max(available_routes, key=lambda r: r["delay_minutes"])
+
         # Primary route
         primary = routes_data[0]
-        
+
         data = {
             # Primary route
             "duration_minutes": primary["duration_minutes"],
@@ -178,13 +266,15 @@ class TrafficPlugin(PluginBase):
             "traffic_color": primary["traffic_color"],
             "destination_name": primary["destination_name"],
             "formatted": primary["formatted"],
+            "travel_mode": primary["travel_mode"],
+            "available": primary["available"],
             # Aggregates
             "route_count": len(routes_data),
             "worst_delay": worst["delay_minutes"],
             # Array
             "routes": routes_data,
         }
-        
+
         self._cache = data
         return PluginResult(available=True, data=data)
     

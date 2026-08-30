@@ -61,6 +61,9 @@ GOOGLE_ROUTES_API_KEY=your_api_key_here
    - **Origin**: Your home address or `40.7128,-74.0060` (coordinates work too)
    - **Destination**: Your work address or `40.7580,-73.9855`
    - **Display Name**: `WORK`
+   - **Travel Mode**: Drive, Bicycle, Transit, Walk, or Motorcycle / Scooter
+     (see [Travel Modes](#travel-modes) — it changes what the delay numbers
+     mean, and what you are billed)
 4. Click **Save**
 
 You can monitor up to **4 routes**. Each one is a separate billable API
@@ -105,6 +108,20 @@ up as an error in the logs rather than as an inline warning in the form.
 2. Check Docker logs: `docker-compose -f docker-compose.dev.yml logs fiestaboard | grep traffic`
 3. Try a different address format
 
+### A Transit Route Shows `NO DATA` or `???`
+
+**Cause**: Google returned no route. For Transit this is usually correct rather
+than broken — there is no service on that leg at the time the board refreshed.
+Late at night, or on a route with no transit coverage, an empty answer is the
+honest one.
+
+**Fix**: nothing to fix if the time of day explains it. If a transit route is
+empty at rush hour, check that both endpoints are near actual stops and try
+coordinates instead of addresses.
+
+The route keeps its slot in the `routes` array either way, so your other routes
+do not move.
+
 ### Using Coordinates Instead of Addresses
 
 If addresses aren't working, you can use latitude,longitude coordinates:
@@ -136,22 +153,87 @@ If addresses aren't working, you can use latitude,longitude coordinates:
 
 ## Travel Modes
 
-The Routes API supports different travel modes:
+Each route has its own **Travel Mode**, set per route in the settings form. It
+defaults to **Drive**, so routes you saved before this setting existed keep
+behaving exactly as they did.
 
-- **🚗 Drive**: Car/driving directions with live traffic
-- **🚴 Bicycle**: Bike routes (bike lanes, paths)
-- **🚇 Transit**: Public transportation (bus, train, subway)
-- **👣 Walk**: Walking directions
+| Mode | Stored as | Live traffic delays? | Billed as |
+|------|-----------|----------------------|-----------|
+| 🚗 Drive | `DRIVE` | **yes** | Compute Routes Pro |
+| 🏍 Motorcycle / Scooter | `TWO_WHEELER` | **yes** | Compute Routes **Enterprise** |
+| 🚴 Bicycle | `BICYCLE` | no | Compute Routes Essentials |
+| 🚇 Transit | `TRANSIT` | no | Compute Routes Essentials |
+| 👣 Walk | `WALK` | no | Compute Routes Essentials |
 
-Each mode returns different routes optimized for that transportation type.
+The mode a route used is available in templates as
+`{{traffic.routes.0.travel_mode}}`.
+
+### ⚠️ Only Drive and Motorcycle have traffic numbers
+
+This is the part worth reading twice, because the board does not make it
+obvious.
+
+Google will only accept a live-traffic request (`routingPreference`) for
+`DRIVE` and `TWO_WHEELER`. Sending it for a walk, bike or transit route is not
+ignored — it is a **400 Bad Request**, and the route would show nothing at all.
+So the plugin omits it for those modes.
+
+The consequence: for Bicycle, Transit and Walk, Google returns a trip duration
+with no traffic model behind it, which means
+
+- `delay_minutes` is always **0**
+- `traffic_status` is always **LIGHT**
+- `traffic_color` is always **green**
+
+Those are not measurements. They are what "there is no traffic model for
+walking" looks like once it reaches the board. The duration itself is real and
+useful; the delay and status are not.
+
+**We have deliberately left it that way** rather than inventing a substitute
+signal — a bike route is not "light traffic", and a made-up number on a
+kitchen wall is worse than an obviously flat one. If you display several modes
+side by side, show `duration_minutes` and leave the status tile off non-drive
+routes:
+
+```
+{{traffic.routes.0.traffic_color}} DRIVE {{traffic.routes.0.duration_minutes}}m
+  BIKE  {{traffic.routes.1.duration_minutes}}m
+  MUNI  {{traffic.routes.2.duration_minutes}}m
+```
+
+### When a route has no answer
+
+Transit is the common case: ask for a bus at 3am and Google correctly returns
+no route at all. A route that comes back empty — for that reason, or because
+the request failed — **keeps its position** in the `routes` array, so
+`{{traffic.routes.2.duration_minutes}}` never starts quietly showing you a
+different commute. It reports:
+
+- `duration_minutes` and `delay_minutes` as no value, which the template engine
+  renders as `???`
+- `traffic_status` as `UNKNOWN` and `traffic_color` as empty (no colour tile)
+- `formatted` as `MUNI: NO DATA`
+- `available` as false, so you can branch on it
+
+`route_count` counts the routes you configured, not the ones that answered.
+The plugin only reports itself as unavailable when *every* route came back
+empty.
 
 ## Costs
 
 Google Maps Platform bills the Routes API **per request**, against a free
 allowance that is granted **per SKU, per month**. Which SKU a request lands in
-depends on what the request asks for. This plugin asks for live traffic
-(`routingPreference: TRAFFIC_AWARE_OPTIMAL`), which puts every request in
-**Compute Routes Pro**.
+depends on what the request asks for, which for this plugin means: **the
+travel mode you pick decides the price**.
+
+- **Drive** asks for live traffic (`routingPreference: TRAFFIC_AWARE_OPTIMAL`),
+  which is a **Compute Routes Pro** request.
+- **Bicycle, Transit and Walk** cannot ask for live traffic at all, so they are
+  plain **Compute Routes Essentials** requests — cheaper, and with double the
+  free allowance.
+- **Motorcycle / Scooter** (`TWO_WHEELER`) is listed by Google under
+  **Compute Routes Enterprise**: the most expensive SKU, with a fifth of
+  Drive's free allowance. Pick it because you ride, not to experiment.
 
 | SKU | Free calls/month | Price per 1,000 after that |
 |-----|------------------|----------------------------|
@@ -167,7 +249,7 @@ Prices change — re-check before you rely on them.)*
 ### What that means for a commute board
 
 One route refreshed every 5 minutes is `43,200 / 5 = 8,640` requests per
-30-day month. Per configured route:
+30-day month. Per configured **Drive** route:
 
 | Routes | Refresh | Requests/month | Billable (over 5,000) | Cost/month |
 |--------|---------|----------------|-----------------------|------------|
@@ -177,6 +259,19 @@ One route refreshed every 5 minutes is `43,200 / 5 = 8,640` requests per
 | 4 | 15 min | 11,520 | 6,520 | **$65.20** |
 | 4 | 40 min | 4,320 | 0 | **free** |
 | 1 | 10 min | 4,320 | 0 | **free** |
+
+The allowances are **per SKU**, so modes draw from separate buckets. The same
+one-route-every-5-minutes board costs:
+
+| Mode | SKU | Free | Billable | Cost/month |
+|------|-----|------|----------|------------|
+| Bicycle / Transit / Walk | Essentials | 10,000 | 0 | **free** |
+| Drive | Pro | 5,000 | 3,640 | **$36.40** |
+| Motorcycle / Scooter | Enterprise | 1,000 | 7,640 | **$114.60** |
+
+A board showing *drive time and bike time* to the same place is not twice the
+price of the drive route — the bike route is free until you pass 10,000
+Essentials calls.
 
 The plugin's default refresh is 5 minutes and its floor is 60 seconds. At the
 60-second floor a single route is 43,200 requests/month — **$382/month**.
@@ -194,6 +289,10 @@ refresh_seconds >= (number of routes) x 2,592,000 / 5,000
 - 1 route → refresh every **10 minutes** (4,320 calls/month)
 - 2 routes → refresh every **20 minutes**
 - 4 routes → refresh every **40 minutes**
+
+Only Drive routes count against that 5,000. Walk, bike and transit routes have
+their own 10,000-call Essentials allowance, and a `TWO_WHEELER` route has its
+own 1,000-call Enterprise one.
 
 A commute board only needs to be right when you are looking at it. A
 15–20 minute refresh is usually indistinguishable on the board and is an order
@@ -224,6 +323,8 @@ the constraint that matters is cost, not throttling.
 
 Here's a complete example for a morning commute:
 
+Three ways to make the same trip, so you can pick one on the way out the door.
+
 **Route 1: Home to Work (Drive)**
 - Origin: `1735 35th Ave, San Francisco, CA 94122`
 - Destination: `525 20th St, San Francisco, CA 94107`
@@ -233,22 +334,34 @@ Here's a complete example for a morning commute:
 **Route 2: Home to Work (Bike)**
 - Origin: `1735 35th Ave, San Francisco, CA 94122`
 - Destination: `525 20th St, San Francisco, CA 94107`
-- Display Name: `WORK-BIKE`
+- Display Name: `BIKE`
 - Travel Mode: Bicycle
 
 **Route 3: Home to Work (Transit)**
 - Origin: `1735 35th Ave, San Francisco, CA 94122`
 - Destination: `525 20th St, San Francisco, CA 94107`
-- Display Name: `WORK-MUNI`
+- Display Name: `MUNI`
 - Travel Mode: Transit
 
 Then in your template:
 ```
 COMMUTE OPTIONS
-DRIVE: {{traffic.routes.0.duration_minutes}}m
-BIKE: {{traffic.routes.1.duration_minutes}}m
-MUNI: {{traffic.routes.2.duration_minutes}}m
+{{traffic.routes.0.traffic_color}} DRIVE {{traffic.routes.0.duration_minutes}}m
+  BIKE  {{traffic.routes.1.duration_minutes}}m
+  MUNI  {{traffic.routes.2.duration_minutes}}m
 ```
 
-This lets you compare all three options at a glance! 🚗🚴🚇
+The colour tile is on the drive route only, because that is the only one of the
+three with a real traffic reading behind it — see
+[Travel Modes](#travel-modes). If the 3am bus does not run, the MUNI line shows
+`???` and the other two are unaffected.
+
+**What this costs**: one Pro request (drive) and two Essentials requests (bike,
+transit) per refresh. At the default 5-minute refresh that is 8,640 Pro calls
+(3,640 over the allowance → $36.40) plus 17,280 Essentials calls (7,280 over →
+$36.40): about **$73/month**.
+
+Set the refresh to **15 minutes** and the same board is **free** — 2,880 Pro
+calls and 5,760 Essentials calls, both inside their allowances. See
+[Costs](#costs).
 
