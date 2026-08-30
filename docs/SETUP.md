@@ -14,18 +14,15 @@ The Traffic feature uses Google's Routes API (v2) to get real-time travel times.
 
 ### Step 2: Set Up Billing
 
-⚠️ **Important**: The Routes API requires a billing account, even though it has a free tier.
+⚠️ **Important**: The Routes API requires a billing account, and this plugin can cost real money. Read this section before you turn the plugin on.
 
 1. Go to **Billing** in the Google Cloud Console
 2. Link a billing account to your project
-3. The Routes API includes:
-   - **$200 free credit per month** (for new users)
-   - First **$200 of usage free every month** (for all users)
-   - After that: ~$0.005 per request
+3. Set a **budget alert** on the project (Billing → Budgets & alerts) so a mistake cannot run away from you
 
-**Typical Usage Costs:**
-- Checking 1 route every 5 minutes = ~8,640 requests/month = **FREE** (well under $200)
-- Checking 5 routes every 5 minutes = ~43,200 requests/month = ~$16/month
+> **The $200/month credit is gone.** Google retired the flat, platform-wide $200 monthly credit on **1 March 2025** and replaced it with a smaller free allowance *per SKU*. Older guides — including previous versions of this one — that tell you a commute board is free are wrong.
+
+See [Costs](#costs) below for what this plugin actually bills.
 
 ### Step 3: Create an API Key
 
@@ -56,18 +53,23 @@ Add to your `.env` file:
 GOOGLE_ROUTES_API_KEY=your_api_key_here
 ```
 
-### Step 5: Test It
+### Step 5: Add a Route
 
 1. In the web UI, go to the **Traffic** plugin on the **Integrations** page
-2. Click "Add Route"
+2. Click **Add Routes**
 3. Enter:
    - **Origin**: Your home address or `40.7128,-74.0060` (coordinates work too)
    - **Destination**: Your work address or `40.7580,-73.9855`
    - **Display Name**: `WORK`
-   - **Travel Mode**: Choose Drive, Bicycle, Transit, or Walk
-4. Click "Validate Route"
+4. Click **Save**
 
-If it works, you'll see: ✅ "Route is valid! Estimated travel time: ~X minutes"
+You can monitor up to **4 routes**. Each one is a separate billable API
+request on every refresh — see [Costs](#costs).
+
+There is no per-route validation button. To confirm the route works, put
+`{{traffic.formatted}}` on a page and look at the board — or check the logs
+(see [Troubleshooting](#troubleshooting)). A route Google cannot resolve shows
+up as an error in the logs rather than as an inline warning in the form.
 
 ## Troubleshooting
 
@@ -89,12 +91,14 @@ If it works, you'll see: ✅ "Route is valid! Estimated travel time: ~X minutes"
 2. Or use coordinates: `40.7128,-74.0060`
 3. Avoid ambiguous addresses like "Main Street"
 
-### Error: "Failed to validate route"
+### The Board Shows `???` Instead of a Time
+
+`???` is what the template engine renders when a value is missing.
 
 **Possible causes**:
-1. API key is incorrect
-2. API key restrictions are too strict
-3. Network connectivity issues
+1. API key is incorrect, or its restrictions are too strict
+2. Network connectivity issues
+3. Google returned no route for that origin/destination pair
 
 **Fix**:
 1. Double-check your API key in Settings
@@ -141,11 +145,64 @@ The Routes API supports different travel modes:
 
 Each mode returns different routes optimized for that transportation type.
 
-## API Limits & Quotas
+## Costs
 
-- **Free tier**: $200/month in free usage
-- **Rate limit**: No hard limit, but be reasonable
-- **Recommended refresh**: 5-10 minutes (our default is 5 minutes)
+Google Maps Platform bills the Routes API **per request**, against a free
+allowance that is granted **per SKU, per month**. Which SKU a request lands in
+depends on what the request asks for. This plugin asks for live traffic
+(`routingPreference: TRAFFIC_AWARE_OPTIMAL`), which puts every request in
+**Compute Routes Pro**.
+
+| SKU | Free calls/month | Price per 1,000 after that |
+|-----|------------------|----------------------------|
+| Compute Routes Essentials | 10,000 | $5.00 |
+| **Compute Routes Pro** — what this plugin uses | **5,000** | **$10.00** |
+| Compute Routes Enterprise | 1,000 | $15.00 |
+
+*(First volume tier, i.e. up to 100,000 calls/month. Verified against
+[Google's core services pricing list](https://developers.google.com/maps/billing-and-pricing/pricing)
+and the [Routes API usage and billing guide](https://developers.google.com/maps/documentation/routes/usage-and-billing).
+Prices change — re-check before you rely on them.)*
+
+### What that means for a commute board
+
+One route refreshed every 5 minutes is `43,200 / 5 = 8,640` requests per
+30-day month. Per configured route:
+
+| Routes | Refresh | Requests/month | Billable (over 5,000) | Cost/month |
+|--------|---------|----------------|-----------------------|------------|
+| 1 | 5 min | 8,640 | 3,640 | **$36.40** |
+| 2 | 5 min | 17,280 | 12,280 | **$122.80** |
+| 4 | 5 min | 34,560 | 29,560 | **$295.60** |
+| 4 | 15 min | 11,520 | 6,520 | **$65.20** |
+| 4 | 40 min | 4,320 | 0 | **free** |
+| 1 | 10 min | 4,320 | 0 | **free** |
+
+The plugin's default refresh is 5 minutes and its floor is 60 seconds. At the
+60-second floor a single route is 43,200 requests/month — **$382/month**.
+
+### Staying inside the free tier
+
+The free allowance is 5,000 Compute Routes Pro calls per month across your
+whole Google Cloud project. To stay under it:
+
+```
+refresh_seconds >= (number of routes) x 2,592,000 / 5,000
+                =  (number of routes) x 519
+```
+
+- 1 route → refresh every **10 minutes** (4,320 calls/month)
+- 2 routes → refresh every **20 minutes**
+- 4 routes → refresh every **40 minutes**
+
+A commute board only needs to be right when you are looking at it. A
+15–20 minute refresh is usually indistinguishable on the board and is an order
+of magnitude cheaper.
+
+### Rate limits
+
+No hard request-rate limit beyond the per-minute quotas in your Cloud project;
+the constraint that matters is cost, not throttling.
 
 ## Privacy & Security
 
@@ -188,9 +245,9 @@ Here's a complete example for a morning commute:
 Then in your template:
 ```
 COMMUTE OPTIONS
-DRIVE: {traffic.routes.0.duration_minutes}m
-BIKE: {traffic.routes.1.duration_minutes}m
-MUNI: {traffic.routes.2.duration_minutes}m
+DRIVE: {{traffic.routes.0.duration_minutes}}m
+BIKE: {{traffic.routes.1.duration_minutes}}m
+MUNI: {{traffic.routes.2.duration_minutes}}m
 ```
 
 This lets you compare all three options at a glance! 🚗🚴🚇
