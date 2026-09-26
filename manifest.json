@@ -1,7 +1,7 @@
 {
   "id": "traffic",
   "name": "Traffic",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Display commute times and traffic conditions using Google Routes API",
   "author": "FiestaBoard Team",
   "repository": "https://github.com/Fiestaboard/fiestaboard-plugin--traffic",
@@ -267,6 +267,19 @@
         "{65}{65} TRAFFIC",
         "WORK 25 MIN",
         "{63}+8 MIN DELAY"
+      ]
+    },
+    {
+      "device_type": "note_array",
+      "notes_wide": 2,
+      "notes_tall": 2,
+      "rows": [
+        "            TRAFFIC",
+        "",
+        " WORK: 25 MIN (+8 MIN)",
+        " GYM: 15 MIN",
+        " SCHOOL: 20 MIN (+5 MIN)",
+        ""
       ]
     }
   ],
