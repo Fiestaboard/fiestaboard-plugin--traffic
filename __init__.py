@@ -5,11 +5,23 @@ Displays commute times using Google Routes API.
 
 from typing import Any, Dict, List, Optional, Tuple
 import logging
+import re
 import requests
 
+from src.devices import BoardContext
 from src.plugins.base import PluginBase, PluginResult
+from src.text_to_board import count_tiles, take_tiles
 
 logger = logging.getLogger(__name__)
+
+#: Fallback geometry used when ``self.board`` is unbound (legacy callers, unit
+#: tests, and anything rendered outside a board-scoped ``get_data()`` call).
+#: A Flagship, because that has always been this plugin's assumed shape.
+_DEFAULT_BOARD = BoardContext(device_type="flagship", rows=6, cols=22)
+
+#: Trailing "(+Xm)" delay annotation, dropped first when a formatted route
+#: line has to shrink to fit a narrower board.
+_DELAY_SUFFIX_RE = re.compile(r"\s*\(\+\d+m\)$")
 
 
 class TrafficPlugin(PluginBase):
@@ -94,6 +106,12 @@ class TrafficPlugin(PluginBase):
         show the user the wrong commute.  A route that has no answer right now
         keeps its position and reports no numbers: the template engine renders
         ``None`` as ``???``, which is its established "no value" output.
+
+        ``formatted`` is left at its natural length here -- it is raw route
+        data, not board output.  Sizing it to a specific board is the
+        formatter's job (:meth:`_format_route_line`), not this method's; a
+        placeholder that pre-truncated to one board's width would render
+        wrong on every other board.
         """
         return {
             "duration_minutes": None,
@@ -101,7 +119,7 @@ class TrafficPlugin(PluginBase):
             "traffic_status": "UNKNOWN",
             "traffic_color": "",
             "destination_name": destination_name,
-            "formatted": f"{destination_name}: NO DATA"[:22],
+            "formatted": f"{destination_name}: NO DATA",
             "travel_mode": travel_mode,
             "available": False,
         }
@@ -275,30 +293,105 @@ class TrafficPlugin(PluginBase):
             "routes": routes_data,
         }
 
+        # `self._cache` holds these raw route facts only -- never rendered
+        # lines. The facts are the same regardless of which board asked for
+        # them; `formatted_lines` below is rendered fresh from `self.board`
+        # every call, so there is nothing here to key by geometry.
         self._cache = data
-        return PluginResult(available=True, data=data)
+
+        rows, cols = self._board_dims()
+        formatted_lines = self._build_display_lines(routes_data, rows, cols)
+        return PluginResult(available=True, data=data, formatted_lines=formatted_lines)
     
+    def _board_dims(self) -> Tuple[int, int]:
+        """Rows/cols of the board currently being rendered.
+
+        ``self.board`` is unset outside a board-scoped render (unit tests,
+        legacy callers); a Flagship is the historical assumption for those,
+        so it is the fallback rather than a crash.
+        """
+        board = self.board
+        if board is None:
+            return _DEFAULT_BOARD.rows, _DEFAULT_BOARD.cols
+        return board.rows, board.cols
+
+    def _format_route_line(self, route: Dict[str, Any], cols: int) -> str:
+        """Render one route's line, shrinking to fit *cols* before truncating.
+
+        ``route["formatted"]`` is sized for nothing in particular -- it is
+        raw route data, reused as-is for the ``{{traffic.formatted}}``
+        template variable. A Note (15 cols) can be narrower than that
+        string, so this reflows it: drop the "(+Xm)" delay note, then the
+        ": " separator, before falling back to a hard tile-aware truncation
+        that is at least guaranteed to fit.
+        """
+        text = str(route.get("formatted") or "")
+        if count_tiles(text) <= cols:
+            return text
+
+        without_delay = _DELAY_SUFFIX_RE.sub("", text)
+        if count_tiles(without_delay) <= cols:
+            return without_delay
+
+        compact = without_delay.replace(": ", " ", 1)
+        if count_tiles(compact) <= cols:
+            return compact
+
+        head, _ = take_tiles(compact, cols)
+        return head
+
+    def _build_display_lines(self, routes: List[Dict[str, Any]], rows: int, cols: int) -> List[str]:
+        """Lay ``routes`` out on a ``rows`` x ``cols`` board.
+
+        A title, then one line per route -- reflowed in both axes rather than
+        truncated: a taller board shows more routes (bounded only by how many
+        exist; the ``[:4]`` here is a defensive no-op against the manifest's
+        own ``maxItems`` cap, a config limit, not a board one -- see
+        ``fetch_data``), and a narrower board shrinks each route's text
+        (:meth:`_format_route_line`) instead of clipping it.
+
+        Shared by :meth:`fetch_data` (the live path -- ``PluginResult.
+        formatted_lines``, used when this plugin is placed as a raw display
+        rather than through template variables) and :meth:`get_formatted_display`
+        (the documented hook, currently uncalled by core but held to the same
+        contract), so the two can never drift apart.
+        """
+        routes = routes[:4]
+
+        header = "TRAFFIC".center(cols)
+        available_rows = max(rows - 1, 0)
+        shown_routes = routes[:available_rows]
+
+        lines = [header] + [self._format_route_line(route, cols) for route in shown_routes]
+        while len(lines) < rows:
+            lines.append("")
+
+        # Cosmetic spacer: when there is slack left over after the header and
+        # every shown route, move one blank row to sit right after the title
+        # instead of trailing at the end. Purely visual -- it never changes
+        # row or column counts, and never happens when the board is full.
+        if len(lines) > 1 + len(shown_routes) and lines[-1] == "":
+            lines.insert(1, lines.pop())
+
+        return lines[:rows]
+
     def get_formatted_display(self) -> Optional[List[str]]:
-        """Return default formatted display."""
+        """Return this plugin's own whole-board layout, sized to ``self.board``.
+
+        ``self.board`` is ``None`` outside a board-scoped render (unit tests,
+        legacy callers); that is treated as a Flagship, never a crash.
+        """
         if not self._cache:
             result = self.fetch_data()
             if not result.available:
                 return None
-        
+
         data = self._cache
         if not data:
             return None
-        
-        routes = data.get("routes", [])
-        lines = ["TRAFFIC".center(22), ""]
-        
-        for route in routes[:4]:
-            lines.append(route["formatted"][:22])
-        
-        while len(lines) < 6:
-            lines.append("")
-        
-        return lines[:6]
+
+        rows, cols = self._board_dims()
+        return self._build_display_lines(data.get("routes", []), rows, cols)
 
 
 # Export the plugin class
